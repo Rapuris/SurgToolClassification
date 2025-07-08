@@ -152,3 +152,17 @@ configs/local/default.yaml
 
 # Aim logging
 .aim
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.bmp
+*.tif
+*.tiff
+*.webp
+*.svg
+*.ico
+*.psd
+*.ai
+*.eps
+*.raw
