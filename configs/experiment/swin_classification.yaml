@@ -1,0 +1,25 @@
+# @package _global_
+
+defaults:
+  - override /data: yolov8_classification
+  - override /model: swin
+  - override /callbacks: [default, plot_augmented]
+  - override /trainer: gpu
+
+# tags and seed
+seed: 42
+tags: ["swin", "classification", "yolov8"]
+
+trainer:
+  min_epochs: 10
+  max_epochs: 1000
+  gradient_clip_val: 1.0
+
+data:
+  batch_size: 64
+
+logger:
+  wandb:
+    tags: ${tags}
+    group: "swin_classification"
+  tensorboard: {} 

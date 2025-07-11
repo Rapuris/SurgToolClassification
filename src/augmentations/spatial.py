@@ -7,19 +7,6 @@ import logging
 
 
 log = logging.getLogger(__name__)
-KEYPOINT_NAMES = [
-    "l_asis", "l_gsn", "l_iof", "l_ips", "l_mof", "l_sps",
-    "r_asis", "r_gsn", "r_iof", "r_ips", "r_mof", "r_sps"
-]
-
-LR_PAIRS = [
-    (0, 6),  # l_asis ↔ r_asis
-    (1, 7),  # l_gsn  ↔ r_gsn
-    (2, 8),  # l_iof  ↔ r_iof
-    (3, 9),  # l_ips  ↔ r_ips
-    (4, 10), # l_mof  ↔ r_mof
-    (5, 11)  # l_sps  ↔ r_sps
-]
 
 def assert_float32(img, **kwargs):
     assert img.dtype == np.float32, f"Expected float32 but got {img.dtype}"
@@ -42,29 +29,13 @@ def spatial_augmentation() -> A.Sequential:
 
     """
 
-    #add more spatial transforms 
-    #just rotate 
-    #-45 to 45 
-    #use the flip function from Jeremy 
-    #log.info("spatial augmentation happening")
-    #assert(1==2)
     return A.Compose(
         [
-            #A.RandomCrop(height=150, width=150, p = 0.5),#FromBorders(),
-            A.RandomResizedCrop(size = (224,224), scale = (0, 0.3), p = 0.3),
-            #A.ElasticTransform(keypoint_remapping_method = 'direct'),
-            #don't do crop from border on simulated 
-
-            #random crop, elastic
-            #A.CropAndPad( # only keep for Rob data 
-            #    px=-20,  # Negative for cropping should be -20 
-            #    keep_size=False,  # Don't resize within this transform
-            #    p=1.0
-            #),
+            A.RandomCrop(height=170, width=170, p = 0.4),#FromBorders(),
+            #A.RandomResizedCrop(size = (224,224), scale = (0, 0.1), p = 0.1),
             A.SomeOf([
                  A.OneOf([
-                    #A.Rotate(limit=(-45, 45), crop_border=True, p=0.5),
-                   A.Affine( #  this is the one that messes up the keypoints
+                   A.Affine(
                    scale=(0.6, 1.2),                     
                    translate_percent={"x":(-0.1,0.1), "y":(-0.1,0.1)},
                    rotate=(-30, 30),
@@ -74,20 +45,13 @@ def spatial_augmentation() -> A.Sequential:
                    ),
                     A.RandomRotate90(p=0.7),
                  ], p=0.7),
+                A.OpticalDistortion(distort_limit=(-0.05, 0.05), p = 0.3),
+                A.Perspective(p = 0.3),
                 A.OneOf([
-                   #A.ElasticTransform(),
-                   A.GridDistortion(),
-                ], p=0.5),
-                A.OpticalDistortion(distort_limit=(-0.05, 0.05), p = 0.5),
-                A.OneOf([
-                    A.Perspective(p = 0.5),
-                    #A.ThinPlateSpline(p = 0.5),
-                ], p=0.5),
-            ], n=np.random.randint(1, 4)),
-            
-            SymmetricHorizontalFlip(lr_pairs=LR_PAIRS, p=0.5),
-            #A.Resize(224, 224),
-            #A.Lambda(name="assert_beforefromfloat", image=assert_float32),
+                A.ElasticTransform(alpha=0.5, sigma=25, p=0.3),
+                A.GridDistortion(num_steps=3, distort_limit=0.05, p=0.2),
+            ], p=0.2),
+            ], n=np.random.randint(1, 3)),
         ],
         keypoint_params=A.KeypointParams(format='xy', remove_invisible=False)
     )

@@ -6,10 +6,8 @@ import numpy as np
 from decohints import decohints
 import logging
 import sys
-#sys.path.insert(0, '/nfs/centipede/sampath/prephixSynth/src')
-#from prephix.alb.gaussian_contrast import gaussian_contrast
-from prephix.alb.window import window, adjustable_window, mixture_window
-from prephix.alb.neglog import neglog
+from .window import window, adjustable_window, mixture_window
+from .neglog import neglog
 
 
 log = logging.getLogger(__name__)
@@ -211,15 +209,6 @@ def augmentation_builder(builder: Callable) -> Callable:
                 )
                 transform_kwargs["bboxes"] = bboxes
                 transform_kwargs["category_ids"] = category_ids
-            assert((len(keypoints) == 12)), f'something got screwed up {len(keypoints)}'
-            if len(keypoints) > 0:
-                #log.error("don't remove the invisible keypoints")
-                kwargs["keypoint_params"] = A.KeypointParams(
-                    format="xy", remove_invisible=False
-                )
-                transform_kwargs["keypoints"] = keypoints
-            else:
-                assert(1==2)
 
             if annotations and len(masks) > 0:
                 transform_kwargs["masks"] = masks
@@ -273,9 +262,6 @@ def augmentation_builder(builder: Callable) -> Callable:
                 )
             else:
                  transform =  A.NoOp()
-            if len(transform_kwargs['keypoints']) < 2:
-                #log.error(transform_kwargs)
-                return transform_func
             
             out = transform(**transform_kwargs)
             #log.error(out['image'].max())

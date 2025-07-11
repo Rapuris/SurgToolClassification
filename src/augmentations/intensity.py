@@ -1,9 +1,9 @@
 import numpy as np
 import albumentations as A
-from perphix.augmenters import Dropout, CoarseDropout, gaussian_contrast
-
+from .dropout import Dropout, CoarseDropout
+from .gaussian_contrast import gaussian_contrast
 from .utils import augmentation_builder
-from prephix.alb.window import window, adjustable_window, mixture_window
+from .window import window, adjustable_window, mixture_window
 
 
 def assert_uint8(img, **kwargs):
@@ -90,7 +90,7 @@ def prephix_intensity_augmentation() -> A.SomeOf:
     return A.Compose(
         [
             #neglog() the images are already neglogd
-            A.InvertImg(p = 1), # to bring to white background, black bones
+            A.InvertImg(p = 0.1),
             A.OneOf(
                 [
                     window(0, 1.0, convert=False),
@@ -126,7 +126,7 @@ def intensity_augmentation() -> A.SomeOf:
     """
     return A.Compose(
         [
-            A.InvertImg(p=0.5),
+            A.InvertImg(p=0.3),
             A.SomeOf(
                 [
                     A.OneOf(
@@ -186,7 +186,7 @@ def intensity_augmentation() -> A.SomeOf:
                     A.SaltAndPepper(),
                     A.MultiplicativeNoise(multiplier=(0.8, 1.2), p = 0.3)
                 ],
-                n=np.random.randint(0, 3), # up to 5 before
+                n=np.random.randint(1, 3), # up to 5 before
                 replace=False,
             ),
         ],

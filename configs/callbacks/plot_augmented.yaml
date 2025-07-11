@@ -1,0 +1,6 @@
+image_logger:
+  _target_: src.callbacks.plot_augmented_images_callback.ImageLogger
+  batch_frequency: 500
+  epoch_frequency: 25
+  max_images: 10
+  clamp: true

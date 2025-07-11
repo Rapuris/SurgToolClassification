@@ -5,9 +5,11 @@ default_root_dir: ${paths.output_dir}
 min_epochs: 1 # prevents early stopping
 max_epochs: 10
 
+
 accelerator: cpu
 devices: 1
 
+limit_val_batches: 1
 # mixed precision for extra speed-up
 # precision: 16
 

@@ -4,7 +4,7 @@ import torch.utils.checkpoint as checkpoint
 from einops import rearrange
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 
-from phelix.utils import pylogger
+from src.utils import pylogger
 
 
 log = pylogger.get_pylogger(__name__)

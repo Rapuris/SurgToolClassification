@@ -1,4 +1,3 @@
-import time
 from typing import Any, Dict, Optional, Tuple
 import random
 from pathlib import Path
@@ -7,299 +6,217 @@ import regex as re
 import torch
 from lightning import LightningDataModule
 from torch.utils.data import DataLoader, Dataset
-from torchvision.datasets import MNIST
-from torchvision.transforms import transforms
 from rich.progress import track
-import matplotlib.pyplot as plt
 import numpy as np
-from perphix import utils as perphix_utils
 import json
 from .. import utils
-from .components import PelphixAEDataset
 from typing import Any, Optional, List, Tuple
-from ..augmentations import spatial_augmentation, intensity_augmentation, prephix_intensity_augmentation
-from albumentations.augmentations.crops.functional import crop
-import albumentations as A
-import cv2
+from ..augmentations import spatial_augmentation, intensity_augmentation
 from PIL import Image
-from skimage.exposure import match_histograms
+import cv2
 
 log = logging.getLogger(__name__)
 
+def crop_image_to_bbox(image: np.ndarray, label_path: Path) -> np.ndarray:
+    """
+    Crops the image to the region of the first bounding box in the YOLO label file.
+    The label file should be in YOLO format: class x_center y_center width height (all normalized).
+    Returns the cropped image. If no bbox is found, returns the original image.
+    """
+    if not label_path.exists():
+        return image
+    try:
+        with open(label_path, "r") as f:
+            line = f.readline()
+            if not line:
+                return image
+            parts = line.strip().split()
+            if len(parts) < 5:
+                return image
+            # YOLO: class x_center y_center width height (all normalized)
+            _, x_c, y_c, w, h = map(float, parts[:5])
+            H, W = image.shape[:2]
+            x_c, y_c, w, h = x_c * W, y_c * H, w * W, h * H
+            x1 = int(max(0, x_c - w / 2))
+            y1 = int(max(0, y_c - h / 2))
+            x2 = int(min(W, x_c + w / 2))
+            y2 = int(min(H, y_c + h / 2))
+            if x2 > x1 and y2 > y1:
+                return image[y1:y2, x1:x2]
+            else:
+                return image
+    except Exception as e:
+        log.warning(f"Failed to crop image to bbox for {label_path}: {e}")
+        return image
 
-class ToolDataset(Dataset):
-    """
-    Dataset that loads a PNG image and its corresponding JSON file containing landmarks.
-    The JSON is assumed to contain landmark entries at the top level (e.g., "r_sps": [749, 1304], etc.).
-    We extract the landmarks using the sorted order of the keys, apply augmentations,
-    and then generate a heatmap for each keypoint. If a keypoint is out of bounds, its heatmap is all zeros.
-    """
-    def __init__(
-        self,
-        items: List[Tuple[dict, Path]],
-        train: bool = True,
-        image_size: List[int] = [224, 224],
-        fliph: bool = False,
-        test: bool = False,
-    ):
-        """
-        Args:
-            items: List of tuples (json_data, image_path). The json_data should contain landmark entries.
-            train: Whether the dataset is used for training (affecting augmentation).
-            image_size: Desired output size [width, height] for spatial augmentation.
-            fliph: Whether to horizontally flip the images.
-        """
-        self.test = test
+class ClassificationDataset(Dataset):
+    def __init__(self, items: List[Tuple[Path, int]], train=True, image_size=224):
         self.items = items
         self.train = train
-        self.image_size = list(image_size)
-        self.fliph = fliph
-
+        self.image_size = image_size
+        # Use the imported augmentations
+        self.spatial_transform = spatial_augmentation(
+            train=self.train,
+            last_test=False,
+            test=not self.train,
+            annotations=False,
+            image_size=(self.image_size, self.image_size, 3),
+            normalize=False,
+            do_neglog=False,
+            three_channel=True
+        )
+        self.intensity_transform = intensity_augmentation(
+            train=self.train,
+            last_test=True,
+            test=not self.train,
+            annotations=False,
+            image_size=None,
+            normalize=True,
+            do_neglog=False,
+            three_channel=False
+        )
 
     def __len__(self) -> int:
         return len(self.items)
 
-    def __getitem__(self, index: int) -> Tuple[dict, dict]:
-        # Load the JSON and image and seg path
-        annotation, image_path, seg_file = self.items[index]
-
-        image = np.array(Image.open(str(image_path)))
-        if image.shape != (224, 224):
-            image = image[:, :, 0]
-        if image is None:
-            raise FileNotFoundError(f"Image {image_path} not found.")
-
-        spatial_transform = spatial_augmentation(
-            train=self.train,
-            last_test = False,
-            test = self.test,
-            annotations=True,
-            image_size= (224, 224, 3),
-            normalize=False, 
-            do_neglog = True,
-            three_channel= True
-        )
-    
-        intensity_transform = prephix_intensity_augmentation(
-            train=self.train,
-            last_test = True,
-            test = self.test,
-            annotations=True,
-            image_size=None,
-            normalize=True,
-            do_neglog = False,
-            three_channel = False
-        )
-        bboxes: List = []
-        category_ids: List = []
-        masks: List = []
-        keypoints: List = []
-        transformed = spatial_transform(
-            image=image.copy(),
-            bboxes=bboxes,
-            category_ids=category_ids,
-            masks=masks,
-            keypoints=keypoints, 
-        )
-     
+    def __getitem__(self, idx):
+        img_path, class_idx = self.items[idx]
+        label_path = img_path.parent.parent / "labels" / (img_path.stem + ".txt")
+        image = np.array(Image.open(img_path))#.convert("RGB"))
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        #log.error(image.shape)
+        # Crop to bbox if possible
+        image = crop_image_to_bbox(image, label_path)
+        image = cv2.resize(image, (self.image_size, self.image_size))
+        orig_image = image.copy()
+        
+        cv2.imwrite("orig_image.png", orig_image)
+        #log.error(orig_image.mean())
+        #log.error(f"Before spatial transform: orig_image.shape={orig_image.shape}")
+        #log.error(image.shape)
+        # Apply spatial augmentation
+        transformed = self.spatial_transform(image=image.copy(), bboxes=[], category_ids=[], masks=[], keypoints=[])
         image_spatial = transformed["image"]
-    
-        H, W = image_spatial.shape[:2]
-        target_image = image_spatial
-
-        # Apply intensity augmentation.
-        intensity_transformed = intensity_transform(
-            image=image_spatial.copy(),
-            bboxes=bboxes,
-            category_ids=category_ids,
-            masks=masks,
-            keypoints=keypoints,
-        )
+        # Apply intensity augmentation
+        intensity_transformed = self.intensity_transform(image=image_spatial.copy(), bboxes=[], category_ids=[], masks=[], keypoints=[])
         input_image = intensity_transformed["image"]
-        if self.fliph:
-            input_image = input_image[:, ::-1]
-            target_image = target_image[:, ::-1]
-
-        # Convert images to channel-first format.
+        # Convert to channel-first
         input_image = input_image.transpose(2, 0, 1).astype(np.float32)
-        assert np.isnan(input_image).sum() == 0, np.isnan(input_image).sum()
-        assert np.isinf(input_image).sum() == 0, np.isinf(input_image).sum()
-        target_image = target_image.transpose(2, 0, 1).astype(np.float32)
-        # Build the outputs.
-        inputs = {
-            "image": input_image,
-        }
-        targets = {
-            "image": target_image
-        }
-        return inputs, targets
+        orig_image = orig_image.transpose(2, 0, 1).astype(np.float32)
+        #log.error(f"Image mean: {orig_image.mean()}")
+        return orig_image, input_image, class_idx
+
+def parse_yolo_classification(images_dir: Path, labels_dir: Path) -> List[Tuple[Path, int]]:
+    items = []
+    image_files = sorted(list(images_dir.glob("*.jpg")) + list(images_dir.glob("*.png")))
+    for img_path in image_files:
+        label_path = labels_dir / (img_path.stem + ".txt")
+        if not label_path.exists():
+            log.warning(f"Label file {label_path} not found for image {img_path}, skipping.")
+            continue
+        with open(label_path, "r") as f:
+            class_idx = int(f.readline().split()[0])
+        items.append((img_path, class_idx))
+    return items
+
+def split_items(items: List[Tuple[Path, int]], val_ratio=0.1, seed=42):
+    random.seed(seed)
+    random.shuffle(items)
+    n = len(items)
+    n_val = int(val_ratio * n)
+    val_items = items[:n_val]
+    train_items = items[n_val:]
+    return train_items, val_items
 
 class ToolDataModule(LightningDataModule):
-    """Lighning DataModule for the Surgical Tool Classification dataset.
-
-    This dataset only contains train and validation sets.
-
-    A DataModule implements 6 key methods:
-        def prepare_data(self):
-            # things to do on 1 GPU/TPU (not on every GPU/TPU in DDP)
-            # download data, pre-process, split, save to disk, etc...
-        def setup(self, stage):
-            # things to do on every process in DDP
-            # load data, set variables, etc...
-        def train_dataloader(self):
-            # return train dataloader
-        def val_dataloader(self):
-            # return validation dataloader
-        def test_dataloader(self):
-            # return test dataloader
-        def teardown(self):
-            # called on every process in DDP
-            # clean up after fit or test
-
-    This allows you to share a full dataset without explaining how to download,
-    split, transform and process the data.
-
-    Read the docs:
-        https://lightning.ai/docs/pytorch/latest/data/datamodule.html
-    """
-
     def __init__(
         self,
-        data_dirs: List[str] = ["/mnt/data/Sampath/tool_dataset_1", "/mnt/data/Sampath/tool_dataset_2"], 
+        data_dirs: list = [
+            "/mnt/data2/Sampath/RoboFlowDatasets/Sampath_Annotations/YOLO_finetune"
+        ],
         batch_size: int = 64,
         num_workers: int = 0,
         pin_memory: bool = False,
-        image_size: list[int] = [224, 224], #[512, 512], #[256, 256]
-        fliph: bool = False,
-        image_channels: int = 3,
+        image_size: int = 224,
     ):
         super().__init__()
-
         self.save_hyperparameters(logger=False)
-        self.image_size = [224, 224]
-        self.fliph = fliph
-        self.data_dir = Path(data_dir).expanduser()
-        log.info(f"Data directory: {self.data_dir}")
+        self.data_dirs = [Path(d).expanduser() for d in data_dirs]
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.pin_memory = pin_memory
+        self.image_size = image_size
         self.data_train: Optional[Dataset] = None
         self.data_val: Optional[Dataset] = None
         self.data_test: Optional[Dataset] = None
 
     def prepare_data(self):
-        """Download data if needed.
-
-        Do not use it to assign state (self.x = y).
-        """
-        # Downloads to data/annotations/{name}.json and data/{name} image dir.
         pass
 
+    def _gather_split_items(self, split: str) -> list:
+        """
+        Gather and combine all (img, class_idx) items for a split from all data_dirs.
+        """
+        items = []
+        for data_dir in self.data_dirs:
+            images_dir = data_dir / split / "images"
+            labels_dir = data_dir / split / "labels"
+            if images_dir.exists() and labels_dir.exists():
+                items.extend(parse_yolo_classification(images_dir, labels_dir))
+        return items
+
     def setup(self, stage: Optional[str] = None):
-        """
-        Scans data_dir for JSON files and expects a matching PNG image (with the same basename)
-        for each JSON file. Splits the items into train (80%), validation (10%), and test (10%).
-        """
-        def _load_items(split: str) -> List[Tuple[dict, Path]]:
-            image_files = sorted(list(self.data_dir.rglob("*.json")))
-            train_json_files = [f for f in json_files if self.exclude_pat not in f.parts]
-            #test_json_files = list(set(json_files).difference(train_json_files))
-            log.error('train_json_files: ' + str(len(train_json_files)))
-            assert(len([f for f in json_files if self.exclude_pat in f.parts]) > 0)
-            log.error(len([f for f in json_files if self.exclude_pat in f.parts]))
-            test_json_files = sorted(list(self.rob_dir.rglob("*.json")))
-            random.shuffle(train_json_files)
-            n = len(train_json_files)
-            if n == 0:
-                raise FileNotFoundError(f"No JSON files found in {self.data_dir}")
-            if split == "train":
-                files = train_json_files#[: int(0.9 * n)]
-            elif split == "val":
-                files = train_json_files[int(0.9 * n):]
-            elif split == "test":
-                files = test_json_files #train_json_files[int(0.9 * n):] # change out later
-            else:
-                raise ValueError(f"Invalid split: {split}")
-
-            items: List[Tuple[dict, Path]] = []
-            for json_file in files:
-                #log.info(json_file)
-                with open(json_file, "r") as f:
-                    json_data = json.load(f)
-                    #log.error(json_data)
-                #DO ONLY IF ROB:
-                json_data = {real_name: json_data.get(num_name) for num_name, real_name in ROB_mapping.items()}
-                #assert(len(json_data.values()) == 12), f"bad json data {json_data.values()}"
-                #for all
-                json_data = {i:v for i,v in json_data.items() if i not in keys_to_remove}
-                json_data = {keypoint: json_data[keypoint] for keypoint in SET_ORDER}
-                #log.error(json_data)
-                name = json_file.stem.replace("_landmarks", "")
-                num = name.replace("DRR_", "")
-                img_file = json_file.parent / (name + json_file.suffix)
-
-                image_file = img_file.with_suffix(".jpg")
-               
-                if not image_file.exists():
-                    raise FileNotFoundError(f"Image file {image_file} not found for {json_file}")
-                if not seg_file.exists():
-                    raise FileNotFoundError(f"Seg file {seg_file} not found for {json_file}")
-                items.append((json_data, image_file, seg_file))
-            #log.info(items[0])
-            log.info(f"Loaded {len(items)} items for {split} split.")
-            return items
-
+        # Gather and combine all train/val/test items from all directories
+        all_train_items = self._gather_split_items("train")
+        train_items, val_items = split_items(all_train_items, val_ratio=0.2)
+        val_items, test_items = split_items(val_items, val_ratio=0.25)
+        
+        #train_items = train_items[:10]
+        #val_items = val_items[:5]
+        #test_items = test_items[:5]
+        log.error(f"Train items: {len(train_items)}, Val items: {len(val_items)}, Test items: {len(test_items)}")
+    
         if stage is None or stage == "fit":
-            train_items = _load_items("train")
-            val_items = _load_items("val")
-            self.data_train = LandmarkDataset(
-                train_items, train=True, test= False, image_size=self.image_size, fliph=self.fliph
-            )
-            self.data_val = LandmarkDataset(
-                val_items, train=False, test= False, image_size=self.image_size, fliph=self.fliph
-            )
+            self.data_train = ClassificationDataset(train_items, train=True, image_size=self.image_size)
+            self.data_val = ClassificationDataset(val_items, train=False, image_size=self.image_size)
         if stage is None or stage == "test":
-            test_items = _load_items("test")
-            self.data_test = LandmarkDataset(
-                test_items, train=False, test= True, image_size=self.image_size, fliph=self.fliph
-            )
+            self.data_test = ClassificationDataset(test_items, train=False, image_size=self.image_size)
 
     def train_dataloader(self):
         return DataLoader(
             dataset=self.data_train,
-            batch_size=self.hparams.batch_size,
-            num_workers=self.hparams.num_workers,
-            pin_memory=self.hparams.pin_memory,
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            pin_memory=self.pin_memory,
             shuffle=True,
         )
 
     def val_dataloader(self):
         return DataLoader(
             dataset=self.data_val,
-            batch_size=self.hparams.batch_size,
-            num_workers=self.hparams.num_workers,
-            pin_memory=self.hparams.pin_memory,
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            pin_memory=self.pin_memory,
             shuffle=False,
         )
 
     def test_dataloader(self):
         return DataLoader(
             dataset=self.data_test,
-            batch_size=self.hparams.batch_size,
-            num_workers=self.hparams.num_workers,
-            pin_memory=self.hparams.pin_memory,
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            pin_memory=self.pin_memory,
             shuffle=False,
         )
 
     def teardown(self, stage: Optional[str] = None):
-        """Clean up after fit or test."""
         pass
 
     def state_dict(self):
-        """Extra things to save to checkpoint."""
         return {}
 
     def load_state_dict(self, state_dict: Dict[str, Any]):
-        """Things to do when loading checkpoint."""
         pass
-
 
 if __name__ == "__main__":
     _ = ToolDataModule()
