@@ -1,1 +1,1 @@
-from .swin_transformer import SwinTransformerUnet
+from .swin_transformer import SwinTransformerV2

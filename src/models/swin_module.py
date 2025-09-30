@@ -8,7 +8,7 @@ from PIL import Image
 import numpy as np
 import timm
 import torchmetrics
-
+from .components import SwinTransformerV2
 from ..utils import pylogger
 from .losses import DiceLoss2D, HeatmapLoss2D
 
@@ -29,9 +29,21 @@ class SwinTransformerModule(LightningModule):
         super().__init__()
         self.save_hyperparameters(logger=False)
 
-        self.model = timm.create_model(
-            "swin_tiny_patch4_window7_224", pretrained=True, num_classes=14
+        #self.model =#timm.create_model(
+            #"swin_tiny_patch4_window7_224", pretrained=True, num_classes=14
+        #)
+        self.model = SwinTransformerV2(
+            img_size=224,
+            patch_size=4,
+            in_chans=4,
+            num_classes=num_classes,
+            depths=(2, 2, 6, 2),
+            drop_rate=0.3,
+            attn_drop_rate=0.3,
+            drop_path_rate=0.4,
         )
+        #self.model.load_state_dict(torch.load(checkpoint_path))
+        
         self.criterion = nn.CrossEntropyLoss()
         self.train_acc = torchmetrics.classification.MulticlassAccuracy(num_classes=num_classes, average="macro")
         self.val_acc = torchmetrics.classification.MulticlassAccuracy(num_classes=num_classes, average="macro")

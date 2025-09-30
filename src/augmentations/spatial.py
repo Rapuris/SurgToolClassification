@@ -36,12 +36,12 @@ def spatial_augmentation() -> A.Sequential:
             A.SomeOf([
                  A.OneOf([
                    A.Affine(
-                   scale=(0.6, 1.2),                     
-                   translate_percent={"x":(-0.1,0.1), "y":(-0.1,0.1)},
-                   rotate=(-30, 30),
-                   shear={"x":(-5,5), "y":(-5,5)},
+                   scale=(0.5, 1.4),  # Increased scale range
+                   translate_percent={"x":(-0.15,0.15), "y":(-0.15,0.15)},  # Increased translation
+                   rotate=(-45, 45),  # Increased rotation
+                   shear={"x":(-10,10), "y":(-10,10)},  # Increased shear
                    balanced_scale=True,
-                   p=0.3
+                   p=0.4  # Increased probability
                    ),
                     A.RandomRotate90(p=0.7),
                  ], p=0.7),

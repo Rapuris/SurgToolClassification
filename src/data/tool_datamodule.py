@@ -49,6 +49,44 @@ def crop_image_to_bbox(image: np.ndarray, label_path: Path) -> np.ndarray:
         log.warning(f"Failed to crop image to bbox for {label_path}: {e}")
         return image
 
+def center_plus_jitter_heatmap(
+    h, w,
+    center_sigma_frac=0.12,      # width of main lobe ≈ 12% of min(h,w)
+    center_jitter_frac=0.02,     # how far the center can wander (as frac of min(h,w))
+    n_jitter=10,                 # number of tiny blobs across the image
+    jitter_sigma_px_range=(1,4), # size of tiny blobs (in px)
+    jitter_amp=0.10,             # amplitude of jitter blobs vs center (0..1)
+    seed=None
+):
+    """
+    Returns float32 heatmap in [0,1] shaped (h,w).
+    Big central Gaussian (+ small random offset) + many weak tiny Gaussians anywhere.
+    """
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[0:h, 0:w]
+    yy = yy.astype(np.float32); xx = xx.astype(np.float32)
+    m = float(min(h, w))
+
+    # ---- central lobe (with small offset) ----
+    cx = w/2 + rng.normal(0, center_jitter_frac*m)
+    cy = h/2 + rng.normal(0, center_jitter_frac*m)
+    sigma_c = center_sigma_frac * m
+    H = np.exp(-(((xx-cx)**2 + (yy-cy)**2) / (2*sigma_c**2))).astype(np.float32)  # peak ≈1
+
+    # ---- global jitter blobs ----
+    for _ in range(n_jitter):
+        jx = rng.uniform(0, w)
+        jy = rng.uniform(0, h)
+        sj = rng.uniform(*jitter_sigma_px_range)
+        blob = np.exp(-(((xx-jx)**2 + (yy-jy)**2) / (2*sj*sj)))
+        H += jitter_amp * blob.astype(np.float32)
+
+    # ---- normalize to [0,1] ----
+    H -= H.min()
+    mx = H.max()
+    if mx > 0: H /= mx
+    return H
+
 class ClassificationDataset(Dataset):
     def __init__(self, items: List[Tuple[Path, int]], train=True, image_size=224):
         self.items = items
@@ -101,11 +139,17 @@ class ClassificationDataset(Dataset):
         intensity_transformed = self.intensity_transform(image=image_spatial.copy(), bboxes=[], category_ids=[], masks=[], keypoints=[])
         input_image = intensity_transformed["image"]
         # Convert to channel-first
-        input_image = input_image.transpose(2, 0, 1).astype(np.float32)
+        #print(input_image.shape)
+        Hh, Hw, _ = input_image.shape
+        heatmap = center_plus_jitter_heatmap(Hh, Hw).astype(np.float32)
+        #print('heatmap.shape', heatmap.shape)
+        #print('input_image.shape', input_image.shape)
+        input_image = input_image.transpose(2, 0, 1).astype(np.float32)  # (3, 224, 224)
+        heatmap = heatmap[np.newaxis, :, :].astype(np.float32)  # Add channel dimension: (1, 224, 224)
+        heatmap_input_image = np.concatenate([input_image, heatmap], axis=0).astype(np.float32)  # (4, 224, 224)
         orig_image = orig_image.transpose(2, 0, 1).astype(np.float32)
         #log.error(f"Image mean: {orig_image.mean()}")
-        return orig_image, input_image, class_idx
-
+        return orig_image, heatmap_input_image, class_idx
 def parse_yolo_classification(images_dir: Path, labels_dir: Path) -> List[Tuple[Path, int]]:
     items = []
     image_files = sorted(list(images_dir.glob("*.jpg")) + list(images_dir.glob("*.png")))
@@ -168,17 +212,17 @@ class ToolDataModule(LightningDataModule):
     def setup(self, stage: Optional[str] = None):
         # Gather and combine all train/val/test items from all directories
         all_train_items = self._gather_split_items("train")
-        train_items, val_items = split_items(all_train_items, val_ratio=0.2)
-        val_items, test_items = split_items(val_items, val_ratio=0.25)
+        train_items, real_val_items = split_items(all_train_items, val_ratio=0.1)
+        val_items, test_items = split_items(real_val_items, val_ratio=0.25)
         
         #train_items = train_items[:10]
         #val_items = val_items[:5]
         #test_items = test_items[:5]
-        log.error(f"Train items: {len(train_items)}, Val items: {len(val_items)}, Test items: {len(test_items)}")
+        log.error(f"Train items: {len(train_items)}, Val items: {len(real_val_items)}, Test items: {len(test_items)}")
     
         if stage is None or stage == "fit":
             self.data_train = ClassificationDataset(train_items, train=True, image_size=self.image_size)
-            self.data_val = ClassificationDataset(val_items, train=False, image_size=self.image_size)
+            self.data_val = ClassificationDataset(real_val_items, train=False, image_size=self.image_size)
         if stage is None or stage == "test":
             self.data_test = ClassificationDataset(test_items, train=False, image_size=self.image_size)
 

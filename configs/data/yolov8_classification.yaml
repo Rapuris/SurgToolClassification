@@ -1,7 +1,7 @@
 _target_: src.data.tool_datamodule.ToolDataModule
 data_dirs:
-  - /mnt/data2/Sampath/RoboFlowDatasets/Sampath_Annotations/YOLO_finetune
   - /mnt/data2/Sampath/RoboFlowDatasets/Sampath_Annotations/6_11_Tool_Dataset_Annotations
+  #- /mnt/data2/Sampath/RoboFlowDatasets/Sampath_Annotations/YOLO_finetune
   #- /mnt/data2/Sampath/RoboFlowDatasets/Deep-Learning-1
   #- /mnt/data2/Sampath/RoboFlowDatasets/sure_tools_1-1
   #- /mnt/data2/Sampath/RoboFlowDatasets/Surgical-Instruments-Yolov5-1
