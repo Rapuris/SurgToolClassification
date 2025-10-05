@@ -19,17 +19,36 @@ def fix_plotting(image: np.ndarray) -> np.ndarray:
     if len(image.shape) == 4:
         image = image.squeeze(0)  # Remove batch dimension
     
-    # Handle 3D arrays (height, width, channel) - already in HWC format
+    # Handle 3D arrays (height, width, channel)
     if len(image.shape) == 3:
         if image.shape[2] == 1:  # Single channel (H, W, 1)
             image = np.concatenate([image, image, image], axis=2)  # Convert to RGB
         elif image.shape[2] == 3:  # Already RGB (H, W, 3)
             pass  # No change needed
+        elif image.shape[2] == 4:  # RGB + Heatmap (H, W, 4)
+            # Split RGB and heatmap
+            rgb_image = image[:, :, :3]  # First 3 channels are RGB
+            heatmap = image[:, :, 3]     # Last channel is heatmap (2D)
+            
+            # Normalize heatmap to 0-1 range for overlay
+            if heatmap.max() > heatmap.min():
+                heatmap_normalized = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min())
+            else:
+                heatmap_normalized = np.zeros_like(heatmap, dtype=np.float32)
+            
+            # Create heatmap overlay (red channel for visibility)
+            heatmap_overlay = np.zeros_like(rgb_image, dtype=np.float32)
+            heatmap_overlay[:, :, 0] = heatmap_normalized  # Red channel
+            
+            # Blend RGB image with heatmap overlay
+            alpha = 0.6  # Overlay transparency (0.0 = fully transparent, 1.0 = fully opaque)
+            image = (1 - alpha) * rgb_image.astype(np.float32) + alpha * heatmap_overlay * 255
+            image = np.clip(image, 0, 255).astype(np.uint8)
         else:
-            # Take the first channel and duplicate
-            image = np.concatenate([image[:, :, :1], image[:, :, :1], image[:, :, :1]], axis=2)
+            # Take the first 3 channels and duplicate
+            image = np.concatenate([image[:, :, :3], image[:, :, :3], image[:, :, :3]], axis=2)
     
-    return image 
+    return image
 
 class ImageLogger(Callback):
     def __init__(
@@ -82,41 +101,50 @@ class ImageLogger(Callback):
 
         input_images = images["input_images"]
         for k in range(input_images.shape[0]):
-            input_image = input_images[k] #convert(input_images[k])
-            #log.error(f"input image mean: {input_image.mean()}")
-            #input_image = fix_plotting(input_image)
-            #log.error(f"input image mean after fix: {input_image.mean()}")
+            input_image = input_images[k]
+            
             if isinstance(input_image, torch.Tensor):
                 image = input_image.detach().cpu().numpy().copy()
-            image = image.transpose(1, 2, 0).astype(np.uint8)  # Convert from (C, H, W) to (H, W, C)
-            #assert image.shape[2] == 3, f"Image shape: {image.shape}"
-            #log.error(f"image shape: {image.shape}")
-            if split == "train" and "target_images" in images:
-                #log.error("in train")
-                target_image = convert(images["target_images"][k])
-                #log.error(f"target image shape: {target_image.shape}")
-                #print("target image", target_image.min(), target_image.max())
-                target_image = fix_plotting(target_image)
-                #log.error(f"target image shape: {target_image.shape}")
-                #log.error(f"image shape: {image.shape}")
-                #if input_image.dtype != np.uint8 and target_image.dtype != np.uint8:
-                #    input_image = input_image.astype(np.uint8)
-                #    target_image = target_image.astype(np.uint8)
-                # Normalize both images to 0-255 range for consistent stacking
-                #image_norm = ((input_image - input_image.min()) / (input_image.max() - input_image.min())).astype(np.uint8)
-                #target_norm = ((target_image - target_image.min()) / (target_image.max() - target_image.min()) * 255).astype(np.uint8)
-                if isinstance(input_image, torch.Tensor):
-                    input_image = input_image.detach().cpu().numpy().copy()
-                input_image = input_image.transpose(1, 2, 0).astype(np.uint8)
+            
+            # Convert from (C, H, W) to (H, W, C)
+            image = image.transpose(1, 2, 0).astype(np.uint8)
+            
+            # Handle 4-channel images (RGB + heatmap)
+            if image.shape[2] == 4:
+                # Split RGB and heatmap
+                rgb_image = image[:, :, :3]  # First 3 channels are RGB
+                heatmap = image[:, :, 3]     # Last channel is heatmap (2D)
                 
-                image = np.concatenate([input_image, target_image], axis=0)
+                # Normalize heatmap to 0-1 range for overlay
+                if heatmap.max() > heatmap.min():
+                    heatmap_normalized = (heatmap - heatmap.min()) / (heatmap.max() - heatmap.min())
+                else:
+                    heatmap_normalized = np.zeros_like(heatmap, dtype=np.float32)
+                
+                # Create heatmap overlay (red channel for visibility)
+                heatmap_overlay = np.zeros_like(rgb_image, dtype=np.float32)
+                heatmap_overlay[:, :, 0] = heatmap_normalized  # Red channel
+                
+                # Blend RGB image with heatmap overlay
+                alpha = 0.6  # Overlay transparency (0.0 = fully transparent, 1.0 = fully opaque)
+                image = (1 - alpha) * rgb_image.astype(np.float32) + alpha * heatmap_overlay * 255
+                image = np.clip(image, 0, 255).astype(np.uint8)
+            
+            if split == "train" and "target_images" in images:
+                target_image = convert(images["target_images"][k])
+                target_image = fix_plotting(target_image)
+                
+                # Ensure both images have the same width before concatenating
+                if image.shape[1] != target_image.shape[1]:
+                    # Resize target_image to match input_image width
+                    target_image = cv2.resize(target_image, (image.shape[1], target_image.shape[0]))
+                
+                # Stack input and target images vertically
+                image = np.concatenate([image, target_image], axis=0)
 
             filename = "e-{:06}_b-{:06}_n-{:06}.png".format(current_epoch, batch_idx, k)
             path = os.path.join(root, filename)
             os.makedirs(os.path.split(path)[0], exist_ok=True)
-            # Ensure image is uint8 before saving
-            #if image.dtype != np.uint8:
-            #    image = image.astype(np.uint8)
             cv2.imwrite(path, image)
 
     def log_img(self, pl_module, batch, batch_idx, split="train"):

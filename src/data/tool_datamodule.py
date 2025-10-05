@@ -11,7 +11,7 @@ import numpy as np
 import json
 from .. import utils
 from typing import Any, Optional, List, Tuple
-from ..augmentations import spatial_augmentation, intensity_augmentation
+from ..augmentations import spatial_augmentation, spatial_augmentation_with_heatmap, intensity_augmentation
 from PIL import Image
 import cv2
 
@@ -23,8 +23,8 @@ def crop_image_to_bbox(image: np.ndarray, label_path: Path) -> np.ndarray:
     The label file should be in YOLO format: class x_center y_center width height (all normalized).
     Returns the cropped image. If no bbox is found, returns the original image.
     """
-    if not label_path.exists():
-        return image
+    #if not label_path.exists():
+    #    return image
     try:
         with open(label_path, "r") as f:
             line = f.readline()
@@ -35,6 +35,7 @@ def crop_image_to_bbox(image: np.ndarray, label_path: Path) -> np.ndarray:
                 return image
             # YOLO: class x_center y_center width height (all normalized)
             _, x_c, y_c, w, h = map(float, parts[:5])
+            #print(f"x_c: {x_c}, y_c: {y_c}, w: {w}, h: {h}")
             H, W = image.shape[:2]
             x_c, y_c, w, h = x_c * W, y_c * H, w * W, h * H
             x1 = int(max(0, x_c - w / 2))
@@ -47,45 +48,39 @@ def crop_image_to_bbox(image: np.ndarray, label_path: Path) -> np.ndarray:
                 return image
     except Exception as e:
         log.warning(f"Failed to crop image to bbox for {label_path}: {e}")
+        #assert False, f"Failed to crop image to bbox for {label_path}: {e}"
         return image
 
-def center_plus_jitter_heatmap(
-    h, w,
-    center_sigma_frac=0.12,      # width of main lobe ≈ 12% of min(h,w)
-    center_jitter_frac=0.02,     # how far the center can wander (as frac of min(h,w))
-    n_jitter=10,                 # number of tiny blobs across the image
-    jitter_sigma_px_range=(1,4), # size of tiny blobs (in px)
-    jitter_amp=0.10,             # amplitude of jitter blobs vs center (0..1)
-    seed=None
-):
+def center_plus_jitter_heatmap(height, width, center=None, jitter_std=0.1):
     """
-    Returns float32 heatmap in [0,1] shaped (h,w).
-    Big central Gaussian (+ small random offset) + many weak tiny Gaussians anywhere.
+    Generate a Gaussian heatmap centered at the specified point.
+    
+    Args:
+        height: Height of the heatmap
+        width: Width of the heatmap  
+        center: (x, y) center point. If None, uses image center
+        jitter_std: Standard deviation for jittering the center
     """
-    rng = np.random.default_rng(seed)
-    yy, xx = np.mgrid[0:h, 0:w]
-    yy = yy.astype(np.float32); xx = xx.astype(np.float32)
-    m = float(min(h, w))
-
-    # ---- central lobe (with small offset) ----
-    cx = w/2 + rng.normal(0, center_jitter_frac*m)
-    cy = h/2 + rng.normal(0, center_jitter_frac*m)
-    sigma_c = center_sigma_frac * m
-    H = np.exp(-(((xx-cx)**2 + (yy-cy)**2) / (2*sigma_c**2))).astype(np.float32)  # peak ≈1
-
-    # ---- global jitter blobs ----
-    for _ in range(n_jitter):
-        jx = rng.uniform(0, w)
-        jy = rng.uniform(0, h)
-        sj = rng.uniform(*jitter_sigma_px_range)
-        blob = np.exp(-(((xx-jx)**2 + (yy-jy)**2) / (2*sj*sj)))
-        H += jitter_amp * blob.astype(np.float32)
-
-    # ---- normalize to [0,1] ----
-    H -= H.min()
-    mx = H.max()
-    if mx > 0: H /= mx
-    return H
+    if center is None:
+        center_x, center_y = width // 2, height // 2
+    else:
+        center_x, center_y = center
+    
+    # Add jitter to the center
+    jitter_x = np.random.normal(0, jitter_std * width)
+    jitter_y = np.random.normal(0, jitter_std * height)
+    
+    center_x += jitter_x
+    center_y += jitter_y
+    
+    # Create coordinate grids
+    y, x = np.ogrid[:height, :width]
+    
+    # Calculate distances from center
+    sigma = min(height, width) * 0.1  # Adjust sigma based on image size
+    heatmap = np.exp(-((x - center_x)**2 + (y - center_y)**2) / (2 * sigma**2))
+    
+    return heatmap
 
 class ClassificationDataset(Dataset):
     def __init__(self, items: List[Tuple[Path, int]], train=True, image_size=224):
@@ -93,16 +88,18 @@ class ClassificationDataset(Dataset):
         self.train = train
         self.image_size = image_size
         # Use the imported augmentations
-        self.spatial_transform = spatial_augmentation(
-            train=self.train,
-            last_test=False,
-            test=not self.train,
-            annotations=False,
-            image_size=(self.image_size, self.image_size, 3),
-            normalize=False,
-            do_neglog=False,
-            three_channel=True
-        )
+        self.spatial_transform = spatial_augmentation_with_heatmap()
+        
+        #spatial_augmentation(
+        #    train=self.train,
+        #    last_test=False,
+        #    test=not self.train,
+        #    annotations=False,
+        #    image_size=(self.image_size, self.image_size, 3),
+        #    normalize=False,
+        #    do_neglog=False,
+        #    three_channel=True
+        #)
         self.intensity_transform = intensity_augmentation(
             train=self.train,
             last_test=True,
@@ -117,39 +114,69 @@ class ClassificationDataset(Dataset):
     def __len__(self) -> int:
         return len(self.items)
 
-    def __getitem__(self, idx):
-        img_path, class_idx = self.items[idx]
-        label_path = img_path.parent.parent / "labels" / (img_path.stem + ".txt")
-        image = np.array(Image.open(img_path))#.convert("RGB"))
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, int]:
+        image_path, class_idx = self.items[idx]
+
+        # Load and preprocess image
+        image = cv2.imread(str(image_path))
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        #log.error(image.shape)
-        # Crop to bbox if possible
+        label_path = Path(str(image_path).replace('/images/', '/labels/')).with_suffix('.txt')
+        #print(f"Label path: {label_path}")
         image = crop_image_to_bbox(image, label_path)
-        image = cv2.resize(image, (self.image_size, self.image_size))
+        
         orig_image = image.copy()
         
-        cv2.imwrite("orig_image.png", orig_image)
-        #log.error(orig_image.mean())
-        #log.error(f"Before spatial transform: orig_image.shape={orig_image.shape}")
-        #log.error(image.shape)
-        # Apply spatial augmentation
-        transformed = self.spatial_transform(image=image.copy(), bboxes=[], category_ids=[], masks=[], keypoints=[])
+        #cv2.imwrite("orig_image.png", image)
+
+        # Get the original center point
+        Hh, Hw, _ = image.shape
+        original_center = (Hw // 2, Hh // 2)  # (x, y) format for keypoints
+
+        # Apply spatial transformation with center point as keypoint
+        transformed = self.spatial_transform(
+            image=image.copy(), 
+            bboxes=[], 
+            category_ids=[], 
+            masks=[], 
+            keypoints=[original_center]  # Pass center as keypoint
+        )
         image_spatial = transformed["image"]
-        # Apply intensity augmentation
-        intensity_transformed = self.intensity_transform(image=image_spatial.copy(), bboxes=[], category_ids=[], masks=[], keypoints=[])
+        transformed_center = transformed["keypoints"][0]  # Get transformed center point
+        assert transformed_center != original_center, f"Transformed center: {transformed_center}, Original center: {original_center}"
+
+        # Get the dimensions of the transformed image
+        transformed_h, transformed_w = image_spatial.shape[:2]
+
+        # Generate heatmap at the new transformed center location with correct dimensions
+        heatmap = center_plus_jitter_heatmap(transformed_h, transformed_w, center=transformed_center).astype(np.float32)
+
+        # Apply intensity augmentation (only to RGB image, not heatmap)
+        intensity_transformed = self.intensity_transform(
+            image=image_spatial.copy(), 
+            bboxes=[], 
+            category_ids=[], 
+            masks=[], 
+            keypoints=[]
+        )
         input_image = intensity_transformed["image"]
+
+        # Resize heatmap to match the final image size after intensity transformation
+        final_height, final_width = input_image.shape[:2]
+        heatmap_resized = cv2.resize(heatmap, (final_width, final_height))
+
         # Convert to channel-first
-        #print(input_image.shape)
-        Hh, Hw, _ = input_image.shape
-        heatmap = center_plus_jitter_heatmap(Hh, Hw).astype(np.float32)
-        #print('heatmap.shape', heatmap.shape)
-        #print('input_image.shape', input_image.shape)
         input_image = input_image.transpose(2, 0, 1).astype(np.float32)  # (3, 224, 224)
-        heatmap = heatmap[np.newaxis, :, :].astype(np.float32)  # Add channel dimension: (1, 224, 224)
-        heatmap_input_image = np.concatenate([input_image, heatmap], axis=0).astype(np.float32)  # (4, 224, 224)
-        orig_image = orig_image.transpose(2, 0, 1).astype(np.float32)
-        #log.error(f"Image mean: {orig_image.mean()}")
+        heatmap_resized = heatmap_resized[np.newaxis, :, :].astype(np.float32)  # Add channel dimension: (1, 224, 224)
+        heatmap_input_image = np.concatenate([input_image, heatmap_resized], axis=0).astype(np.float32)  # (4, 224, 224)
+       
+        orig_image = cv2.resize(orig_image, (224, 224))  # Resize to target size
+        orig_image = orig_image.transpose(2, 0, 1).astype(np.float32)  # Convert to (C, H, W)
+        assert orig_image.shape == (3,224, 224), f"Orig image shape: {orig_image.shape}"
+        assert heatmap_input_image.shape == (4, 224, 224)   
         return orig_image, heatmap_input_image, class_idx
+
+
+        
 def parse_yolo_classification(images_dir: Path, labels_dir: Path) -> List[Tuple[Path, int]]:
     items = []
     image_files = sorted(list(images_dir.glob("*.jpg")) + list(images_dir.glob("*.png")))

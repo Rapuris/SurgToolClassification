@@ -31,7 +31,7 @@ def spatial_augmentation() -> A.Sequential:
 
     return A.Compose(
         [
-            A.RandomCrop(height=170, width=170, p = 0.4),#FromBorders(),
+            #A.RandomCrop(height=170, width=170, p = 0.4),#FromBorders(),
             #A.RandomResizedCrop(size = (224,224), scale = (0, 0.1), p = 0.1),
             A.SomeOf([
                  A.OneOf([
@@ -56,3 +56,28 @@ def spatial_augmentation() -> A.Sequential:
         keypoint_params=A.KeypointParams(format='xy', remove_invisible=False)
     )
 
+def spatial_augmentation_with_heatmap() -> A.Compose:
+    """Build an augmentation that supports heatmaps for spatial transformations.
+    
+    Simplified version that's more compatible with keypoints.
+    """
+    return A.Compose(
+        [
+            A.OneOf([
+                A.Affine(
+                    scale=(0.8, 1.2),  # Reduced scale range for better keypoint handling
+                    translate_percent={"x":(-0.1,0.1), "y":(-0.1,0.1)},  # Reduced translation
+                    rotate=(-30, 30),  # Reduced rotation
+                    shear={"x":(-5,5), "y":(-5,5)},  # Reduced shear
+                    p=0.5
+                ),
+                A.RandomRotate90(p=0.3),
+                A.HorizontalFlip(p=0.2),
+            ], p=0.8),
+            A.Resize(224, 224, p=1.0),  # Always resize to target size
+        ],
+        keypoint_params=A.KeypointParams(
+            format='xy', 
+            remove_invisible=False
+        )
+    )
